@@ -10,7 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-# ---------------------- 自定义 R² Callback（适用于单输出模型） ---------------------- #
+# ---------------------- Custom R² Callback (for single-output models) ---------------------- #
 class R2Callback(tf.keras.callbacks.Callback):
     def __init__(self, X_train, y_train, X_val, y_val):
         super().__init__()
@@ -22,7 +22,7 @@ class R2Callback(tf.keras.callbacks.Callback):
         self.val_r2 = []
 
     def on_epoch_end(self, epoch, logs=None):
-        # 对于普通 DNN 模型，predict 返回单个输出
+        # For standard DNN models, predict returns a single output
         y_train_pred = self.model.predict(self.X_train, verbose=0)
         y_val_pred = self.model.predict(self.X_val, verbose=0)
         y_train_true = self.y_train.flatten()
@@ -41,13 +41,13 @@ class R2Callback(tf.keras.callbacks.Callback):
             print(f"Epoch {epoch}: Train R²: {r2_train:.4f}, Val R²: {r2_val:.4f}")
 
 
-# ---------------------- 数据加载与增强 ---------------------- #
+# ---------------------- Data Loading and Preprocessing ---------------------- #
 def load_data(path, noise_level=0.02):
     if path.endswith('.zip'):
         with zipfile.ZipFile(path, 'r') as z:
             csv_files = [f for f in z.namelist() if f.lower().endswith('.csv')]
             if not csv_files:
-                raise ValueError("ZIP文件中未找到CSV文件")
+                raise ValueError("No CSV files found in the ZIP archive")
             extract_path = os.path.join(os.path.dirname(path), "temp_extract")
             os.makedirs(extract_path, exist_ok=True)
             z.extract(csv_files, path=extract_path)
@@ -59,18 +59,18 @@ def load_data(path, noise_level=0.02):
             with open(path, 'r', encoding=encoding) as f:
                 first_line = f.readline()
                 sep = '\t' if '\t' in first_line else ','
-            print(f"检测到编码: {encoding}，分隔符: {repr(sep)}")
+            print(f"Detected encoding: {encoding}, delimiter: {repr(sep)}")
             break
         except (UnicodeDecodeError, IsADirectoryError):
             continue
     else:
-        raise ValueError("无法自动识别文件编码")
+        raise ValueError("Failed to automatically detect file encoding")
 
     df = pd.read_csv(path, sep=sep, engine='python', encoding=encoding, on_bad_lines='warn')
     required_columns = ['Nm', 'Pw', 'mw', 'ma', 'Cs', 'q', 'H', 'D', 'u', 'actual_U']
     missing_cols = set(required_columns) - set(df.columns)
     if missing_cols:
-        raise ValueError(f"缺失关键列: {missing_cols}")
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
     df = df.dropna().reset_index(drop=True)
     df = df[(df['q'] > 0) & (df['H'] > 0) & (df['D'] > 0)]
@@ -79,12 +79,13 @@ def load_data(path, noise_level=0.02):
 
     scaler = MinMaxScaler(feature_range=(1e-5, 1))
     X_scaled = scaler.fit_transform(df[features])
-    # 如有需要可添加高斯噪声：X_scaled += np.random.normal(0, noise_level, X_scaled.shape)
+    # Gaussian noise can be added if needed:
+    # X_scaled += np.random.normal(0, noise_level, X_scaled.shape)
 
     return X_scaled, df[target].values.reshape(-1, 1), scaler, features
 
 
-# ---------------------- 定义普通 DNN 模型 ---------------------- #
+# ---------------------- Define Standard DNN Model ---------------------- #
 def build_dnn_model(num_features):
     model = tf.keras.Sequential([
         tf.keras.layers.Input(shape=(num_features,)),
@@ -95,32 +96,32 @@ def build_dnn_model(num_features):
     return model
 
 
-# ---------------------- 训练与评估过程 ---------------------- #
+# ---------------------- Training and Evaluation ---------------------- #
 def main():
-    DATA_PATH = r"E:\dataset\water.csv"  # 请修改为你的数据路径
-    FIG_PATH = r"E:\PINN explore\pinn+DNN"  # 请修改为你保存结果的文件夹
+    DATA_PATH = r"E:\dataset\water.csv"  # Modify this to your dataset path
+    FIG_PATH = r"E:\PINN explore\pinn+DNN"  # Modify this to your results folder
     os.makedirs(FIG_PATH, exist_ok=True)
 
     try:
         X, y, scaler, features = load_data(DATA_PATH)
-        print(f"数据加载成功，样本数: {len(X)}")
-        # 将输入调整为二维数据，每行包含所有特征
+        print(f"Data successfully loaded, number of samples: {len(X)}")
+        # Reshape input into 2D, each row contains all features
         X_data = X.reshape(-1, len(features))
-        print("输入数据形状:", X_data.shape)
+        print("Input data shape:", X_data.shape)
     except Exception as e:
-        print(f"数据加载失败: {str(e)}")
+        print(f"Data loading failed: {str(e)}")
         return
 
     X_train, X_val, y_train, y_val = train_test_split(X_data, y, test_size=0.2, random_state=42)
 
-    # 构建普通 DNN 模型
+    # Build a standard DNN model
     model = build_dnn_model(num_features=len(features))
-    # 设置学习率和优化器
+    # Define optimizer and learning rate
     model.compile(optimizer=tf.keras.optimizers.Adam(0.005),
                   loss=tf.keras.losses.MeanSquaredError(),
                   metrics=['mae'])
 
-    # 创建 R² Callback
+    # Create R² callback
     r2_callback = R2Callback(X_train, y_train, X_val, y_val)
 
     history = model.fit(
@@ -141,7 +142,7 @@ def main():
         verbose=2
     )
 
-    # ------------------- 使用 Plotly 绘制训练过程图 ------------------- #
+    # ------------------- Plot training process with Plotly ------------------- #
     fig = make_subplots(rows=3, cols=1, subplot_titles=(
         'Training and Validation Loss', 'Training and Validation MAE', 'Training and Validation R²'))
     fig.add_trace(
@@ -177,7 +178,7 @@ def main():
     fig.update_yaxes(title_text="R²", row=3, col=1, tickformat='.2f')
     fig.write_html(os.path.join(FIG_PATH, 'training_process_interactive_chart.html'))
 
-    # ------------------- 使用 Plotly 绘制实际值与预测值对比图 ------------------- #
+    # ------------------- Plot comparison of actual vs predicted values ------------------- #
     y_pred = model.predict(X_val)
     num_samples = min(len(y_val), 20)
     selected_indices = np.sort(np.random.choice(len(y_val), num_samples, replace=False))
@@ -204,7 +205,7 @@ def main():
     )
     fig2.write_html(os.path.join(FIG_PATH, 'actual_vs_predicted_interactive_chart.html'))
 
-    # ------------------- 计算评估指标 ------------------- #
+    # ------------------- Compute evaluation metrics ------------------- #
     y_val_flat = y_val.flatten()
     y_pred_flat = y_pred.flatten()
     ss_res = np.sum((y_val_flat - y_pred_flat) ** 2)
@@ -213,10 +214,10 @@ def main():
     print(f"R²: {r2:.4f}")
 
     mape = np.mean(np.abs((y_val_flat - y_pred_flat) / (y_val_flat + 1e-8))) * 100.0
-    print(f"DNN预测 MAPE: {mape:.2f}%")
+    print(f"DNN prediction MAPE: {mape:.2f}%")
 
-    # ------------------- 使用 Matplotlib 绘制结果图 ------------------- #
-    # 1. Loss 曲线
+    # ------------------- Plot results with Matplotlib ------------------- #
+    # 1. Loss curves
     plt.figure(figsize=(8, 6))
     plt.plot(history.history['loss'], label='Training Loss', linewidth=2)
     plt.plot(history.history['val_loss'], label='Validation Loss', linewidth=2)
@@ -228,7 +229,7 @@ def main():
     plt.savefig(os.path.join(FIG_PATH, 'loss_plot.png'), dpi=300)
     plt.close()
 
-    # 2. MAE 曲线
+    # 2. MAE curves
     plt.figure(figsize=(8, 6))
     plt.plot(history.history['mae'], label='Training MAE', linewidth=2)
     plt.plot(history.history['val_mae'], label='Validation MAE', linewidth=2)
@@ -240,7 +241,7 @@ def main():
     plt.savefig(os.path.join(FIG_PATH, 'mae_plot.png'), dpi=300)
     plt.close()
 
-    # 3. R² 曲线
+    # 3. R² curves
     plt.figure(figsize=(8, 6))
     plt.plot(r2_callback.train_r2, label='Training R²', linewidth=2)
     plt.plot(r2_callback.val_r2, label='Validation R²', linewidth=2)
@@ -252,7 +253,7 @@ def main():
     plt.savefig(os.path.join(FIG_PATH, 'r2_plot.png'), dpi=300)
     plt.close()
 
-    # 4. 散点图：实际值 vs. DNN 预测
+    # 4. Scatter plot: Actual vs. DNN predictions
     plt.figure(figsize=(8, 6))
     plt.scatter(range(len(y_val_flat)), y_val_flat, c='black', s=30, label='Actual Values', marker='o')
     plt.scatter(range(len(y_pred_flat)), y_pred_flat, c='red', s=30, label='Predicted Values', marker='^')
@@ -264,7 +265,7 @@ def main():
     plt.savefig(os.path.join(FIG_PATH, 'scatter_plot.png'), dpi=300)
     plt.close()
 
-    print(f"训练完成！结果已保存至：{FIG_PATH}")
+    print(f"Training completed! Results saved at: {FIG_PATH}")
 
 
 if __name__ == "__main__":
