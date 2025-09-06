@@ -14,7 +14,7 @@ tfd = tfp.distributions
 tfk = tf.keras
 
 
-# 自定义 Softplus 层（带完整序列化支持）
+# Custom Softplus Layer (with full serialization support)
 class SoftplusLayer(tfk.layers.Layer):
     def call(self, inputs):
         return 1e-3 + tf.nn.softplus(inputs)
@@ -23,13 +23,13 @@ class SoftplusLayer(tfk.layers.Layer):
         return super().get_config()
 
 
-# 数据加载函数（与原代码保持一致）
+# Data loading function (consistent with original code)
 def load_data(path, noise_level=0.02):
     if path.endswith('.zip'):
         with zipfile.ZipFile(path, 'r') as z:
             csv_files = [f for f in z.namelist() if f.lower().endswith('.csv')]
             if not csv_files:
-                raise ValueError("ZIP文件中未找到CSV文件")
+                raise ValueError("No CSV files found in ZIP archive")
             extract_path = os.path.join(os.path.dirname(path), "temp_extract")
             os.makedirs(extract_path, exist_ok=True)
             z.extract(csv_files, path=extract_path)
@@ -41,18 +41,18 @@ def load_data(path, noise_level=0.02):
             with open(path, 'r', encoding=encoding) as f:
                 first_line = f.readline()
                 sep = '\t' if '\t' in first_line else ','
-            print(f"检测到编码: {encoding}，分隔符: {repr(sep)}")
+            print(f"Detected encoding: {encoding}, delimiter: {repr(sep)}")
             break
         except (UnicodeDecodeError, IsADirectoryError):
             continue
     else:
-        raise ValueError("无法自动识别文件编码")
+        raise ValueError("Failed to detect file encoding automatically")
 
     df = pd.read_csv(path, sep=sep, engine='python', encoding=encoding, on_bad_lines='warn')
     required_columns = ['Nm', 'Pw', 'mw', 'ma', 'Cs', 'q', 'H', 'D', 'u', 'actual_U']
     missing_cols = set(required_columns) - set(df.columns)
     if missing_cols:
-        raise ValueError(f"缺失关键列: {missing_cols}")
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
     df = df.dropna().reset_index(drop=True)
     df = df[(df['q'] > 0) & (df['H'] > 0) & (df['D'] > 0)]
@@ -63,7 +63,7 @@ def load_data(path, noise_level=0.02):
     return X_scaled, df[target].values.reshape(-1, 1), scaler, features
 
 
-# 计算 R² 与 MAPE 的函数
+# Functions to compute R² and MAPE
 def compute_r2(y_true, y_pred):
     ss_total = np.sum((y_true - np.mean(y_true)) ** 2)
     ss_res = np.sum((y_true - y_pred) ** 2)
@@ -74,25 +74,25 @@ def compute_mape(y_true, y_pred):
     return np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
 
 
-# PINN+LSTM 模型
+# PINN+LSTM model
 class PINNLSTMModel(tfk.Model):
     def __init__(self, num_features, scaler_min, scaler_scale, **kwargs):
         super().__init__(**kwargs)
         self.num_features = num_features
-        # 保存缩放参数（可序列化）
+        # Save scaling parameters (serializable)
         self.scaler_min = scaler_min.tolist() if isinstance(scaler_min, np.ndarray) else scaler_min
         self.scaler_scale = scaler_scale.tolist() if isinstance(scaler_scale, np.ndarray) else scaler_scale
         self.scaler_min_tensor = tf.constant(self.scaler_min, dtype=tf.float32)
         self.scaler_scale_tensor = tf.constant(self.scaler_scale, dtype=tf.float32)
 
-        # 网络结构
+        # Network architecture
         self.lstm_layer = tfk.layers.LSTM(16, return_sequences=False,
                                           kernel_regularizer=tfk.regularizers.l2(0.01))
         self.dropout = tfk.layers.Dropout(0.01)
         self.loc_layer = tfk.layers.Dense(1, kernel_regularizer=tfk.regularizers.l2(0.001))
         self.scale_layer = tfk.layers.Dense(1, kernel_regularizer=tfk.regularizers.l2(0.001))
         self.softplus_layer = SoftplusLayer()
-        # physics_corrector 无偏置，确保梯度传播
+        # physics_corrector has no bias to ensure gradient flow
         self.physics_corrector = tfk.Sequential([
             tfk.layers.Dense(8, activation='relu', input_shape=(8,), kernel_regularizer=tfk.regularizers.l2(0.001)),
             tfk.layers.Dense(1, use_bias=False)
@@ -114,22 +114,22 @@ class PINNLSTMModel(tfk.Model):
         return cls(**config)
 
     def call(self, inputs, training=False):
-        # LSTM部分
+        # LSTM part
         x = self.lstm_layer(inputs)
         x = self.dropout(x, training=training)
         loc = self.loc_layer(x)
         scale = self.softplus_layer(self.scale_layer(x))
         temporal_dist = tfd.Normal(loc=loc, scale=scale)
         temporal_mean = temporal_dist.mean()
-        # 物理修正部分
+        # Physics correction part
         inputs_flat = tf.squeeze(inputs, axis=1)
         correction_input = tf.concat([inputs_flat, temporal_mean], axis=-1)
         correction = self.physics_corrector(correction_input)
-        # 物理公式计算
+        # Physics-based formula calculation
         physics_output = self.physics_model(inputs, training=training)
 
         corrected_output = physics_output * tf.exp(0.05 * correction)
-        # 返回元组，便于损失函数同时获取修正预测、物理预测及不确定性参数
+        # Return tuple for loss function to access corrected prediction, physics prediction, and uncertainty parameters
         return corrected_output, physics_output, loc, scale
 
     @tf.function
@@ -143,18 +143,18 @@ class PINNLSTMModel(tfk.Model):
         return tf.expand_dims((numerator / denominator) ** 1.15, axis=-1)
 
 
-# 自定义损失函数，传入真实值、预测值（元组中的修正预测与物理预测）以及权重参数
+# Custom loss function: takes ground truth, predictions (corrected and physics-based), and weighting parameters
 def compute_loss(y_true, corrected_output, physics_output, loc, scale, model,
                  weight_data=0.6, weight_physics=0.1, weight_reg=0.3):
-    # 确保 y_true 为 float32 类型
+    # Ensure y_true is float32
     y_true = tf.cast(y_true, tf.float32)
-    # 数据损失：修正预测与真实值之间的均方误差
+    # Data loss: MSE between corrected prediction and ground truth
     data_loss = tf.reduce_mean(tf.square(y_true - corrected_output))
-    # 物理损失：物理公式预测与修正预测之间的均方误差
+    # Physics loss: MSE between corrected prediction and physics prediction
     physics_mae = tf.reduce_mean(tf.abs(corrected_output - physics_output))
     adaptive_weight = tf.minimum(0.5, 1.0 / (physics_mae + 1e-8))
     physics_loss = adaptive_weight * tf.reduce_mean(tf.square((corrected_output - physics_output)))
-    # KL散度作为正则化损失：这里利用不确定性分布估计
+    # KL divergence as regularization loss: using uncertainty distribution estimation
     temporal_dist = tfd.Normal(loc=loc, scale=scale)
     log_prob = temporal_dist.log_prob(corrected_output)
     kl_loss = -tf.reduce_mean(log_prob)
@@ -162,17 +162,17 @@ def compute_loss(y_true, corrected_output, physics_output, loc, scale, model,
     return total_loss, data_loss, physics_loss, kl_loss
 
 
-# 自定义训练循环（参考代码B架构，同时保存每个epoch的日志信息）
+# Custom training loop (reference to Architecture B, with logging for each epoch)
 def train_model(model, X_train, y_train, X_val, y_val,
                 weight_data=0.6, weight_physics=0.1, weight_reg=0.3,
                 epochs=2300, batch_size=32, learning_rate=0.0005, patience=400):
     optimizer = tf.keras.optimizers.Adam(learning_rate, clipvalue=0.5)
     dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(batch_size)
 
-    # 历史记录
+    # History records
     history_epoch = []
     history_total_loss = []
-    history_val_total_loss = []   # 验证集损失记录
+    history_val_total_loss = []   # Validation loss history
     history_data_loss = []
     history_physics_loss = []
     history_reg_loss = []
@@ -181,7 +181,7 @@ def train_model(model, X_train, y_train, X_val, y_val,
     history_train_mape = []
     history_val_mape = []
 
-    # 早停机制变量
+    # Early stopping variables
     best_val_loss = float('inf')
     patience_counter = 0
 
@@ -191,7 +191,7 @@ def train_model(model, X_train, y_train, X_val, y_val,
         epoch_physics_loss = tf.keras.metrics.Mean()
         epoch_reg_loss = tf.keras.metrics.Mean()
 
-        # 遍历每个batch进行训练
+        # Training on each batch
         for x_batch, y_batch in dataset:
             with tf.GradientTape() as tape:
                 corrected_output, physics_output, loc, scale = model(x_batch, training=True)
@@ -209,11 +209,11 @@ def train_model(model, X_train, y_train, X_val, y_val,
             epoch_physics_loss.update_state(physics_loss)
             epoch_reg_loss.update_state(kl_loss)
 
-        # 训练集评估
+        # Training evaluation
         corrected_train, _, _, _ = model(X_train, training=False)
         train_r2 = compute_r2(y_train.flatten(), corrected_train.numpy().flatten())
         train_mape = compute_mape(y_train.flatten(), corrected_train.numpy().flatten())
-        # 验证集评估
+        # Validation evaluation
         corrected_val, physics_val, loc_val, scale_val = model(X_val, training=False)
         val_r2 = compute_r2(y_val.flatten(), corrected_val.numpy().flatten())
         val_mape = compute_mape(y_val.flatten(), corrected_val.numpy().flatten())
@@ -222,7 +222,7 @@ def train_model(model, X_train, y_train, X_val, y_val,
                                          weight_physics=weight_physics,
                                          weight_reg=weight_reg)
 
-        # 保存历史记录
+        # Save history
         history_epoch.append(epoch)
         history_total_loss.append(epoch_loss_avg.result().numpy())
         history_val_total_loss.append(val_loss.numpy())
@@ -234,13 +234,13 @@ def train_model(model, X_train, y_train, X_val, y_val,
         history_train_mape.append(train_mape)
         history_val_mape.append(val_mape)
 
-        # 输出当前epoch的日志信息
+        # Print log info for this epoch
         print(f"Epoch {epoch}: Train Loss = {epoch_loss_avg.result():.6f}, Val Loss = {val_loss:.6f}, "
               f"Data Loss = {epoch_data_loss.result():.6f}, Physics Loss = {epoch_physics_loss.result():.6f}, "
               f"KL Loss = {epoch_reg_loss.result():.6f}, Train R² = {train_r2:.5f}, Val R² = {val_r2:.5f}, "
               f"Train MAPE = {train_mape:.2f}%, Val MAPE = {val_mape:.2f}%")
 
-        # 判断早停条件：如果验证损失有改善则重置计数器，否则累加
+        # Early stopping check
         if val_loss.numpy() < best_val_loss:
             best_val_loss = val_loss.numpy()
             patience_counter = 0
@@ -248,7 +248,7 @@ def train_model(model, X_train, y_train, X_val, y_val,
             patience_counter += 1
 
         if patience_counter >= patience:
-            print(f"验证损失在连续 {patience} 个epoch内没有改善，提前停止训练。")
+            print(f"Validation loss did not improve for {patience} consecutive epochs, stopping early.")
             break
 
     print(f"Final Validation Loss: {val_loss:.6f}")
@@ -270,26 +270,26 @@ def train_model(model, X_train, y_train, X_val, y_val,
 
 def plot_history(history, fig_path):
     epochs = history["epoch"]
-    # 使用 Plotly 绘制交互式图表
+    # Use Plotly for interactive charts
     fig = make_subplots(rows=3, cols=1, subplot_titles=(
         'Training and Validation Loss',
         'Training and Validation MAPE',
         'Training and Validation R²'
     ))
-    # 损失图：添加训练损失和验证损失曲线
+    # Loss plot: training vs validation
     fig.add_trace(go.Scatter(x=epochs, y=history["total_loss"], mode='lines', name='Train Loss'), row=1, col=1)
     fig.add_trace(go.Scatter(x=epochs, y=history["val_total_loss"], mode='lines', name='Validation Loss'), row=1, col=1)
-    # MAPE图
+    # MAPE plot
     fig.add_trace(go.Scatter(x=epochs, y=history["train_mape"], mode='lines', name='Train MAPE'), row=2, col=1)
     fig.add_trace(go.Scatter(x=epochs, y=history["val_mape"], mode='lines', name='Val MAPE'), row=2, col=1)
-    # R²图
+    # R² plot
     fig.add_trace(go.Scatter(x=epochs, y=history["train_r2"], mode='lines', name='Train R²'), row=3, col=1)
     fig.add_trace(go.Scatter(x=epochs, y=history["val_r2"], mode='lines', name='Val R²'), row=3, col=1)
 
     fig.update_layout(height=900, width=1600, title_text="Training Process (Interactive Chart)", showlegend=True)
     fig.write_html(os.path.join(fig_path, 'training_process_interactive_chart.html'))
 
-    # 用 matplotlib 绘制静态图：损失图中同时绘制训练和验证损失曲线
+    # Static plots with matplotlib
     plt.figure(figsize=(8, 6))
     plt.plot(epochs, history["total_loss"], label='Train Loss', linewidth=2)
     plt.plot(epochs, history["val_total_loss"], label='Validation Loss', linewidth=2)
@@ -330,7 +330,7 @@ def plot_predictions(y_true, y_pred_corrected, y_pred_physics, fig_path):
     y_true_selected = y_true.flatten()[selected_indices]
     y_pred_selected = y_pred_corrected.flatten()[selected_indices]
 
-    # 使用 Plotly 绘制实际值与预测值对比的交互图
+    # Interactive plot with Plotly: actual vs corrected predictions
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=selected_indices, y=y_true_selected,
                              mode='markers+lines', name='Actual Values'))
@@ -338,7 +338,7 @@ def plot_predictions(y_true, y_pred_corrected, y_pred_physics, fig_path):
                              mode='markers+lines', name='Corrected Prediction'))
     fig.write_html(os.path.join(fig_path, 'actual_vs_predicted_interactive_chart.html'))
 
-    # 使用 matplotlib 绘制散点图：实际值、物理预测、修正预测对比
+    # Static scatter plot: actual, physics, corrected
     plt.figure(figsize=(8, 6))
     plt.scatter(range(len(y_true)), y_true, c='black', s=30, label='Actual Values', marker='o')
     plt.scatter(range(len(y_pred_physics)), y_pred_physics, c='blue', s=30, label='Physics Prediction', marker='d')
@@ -359,29 +359,29 @@ def main():
 
     try:
         X, y, scaler, features = load_data(DATA_PATH)
-        print(f"数据加载成功，样本数: {len(X)}")
+        print(f"Data loaded successfully, number of samples: {len(X)}")
         X_seq = X.reshape(-1, 1, len(features))
-        print("输入数据形状:", X_seq.shape)
+        print("Input data shape:", X_seq.shape)
     except Exception as e:
-        print(f"数据加载失败: {str(e)}")
+        print(f"Data loading failed: {str(e)}")
         return
 
     X_train, X_val, y_train, y_val = train_test_split(X_seq, y, test_size=0.2, random_state=42)
 
-    # 实例化模型
+    # Instantiate model
     model = PINNLSTMModel(
         num_features=len(features),
         scaler_min=scaler.min_,
         scaler_scale=scaler.scale_
     )
 
-    # 使用自定义训练循环训练模型，并获取历史记录
+    # Train model with custom loop and get training history
     trained_model, history = train_model(model, X_train, y_train, X_val, y_val,
                                          weight_data=0.6, weight_physics=0.1, weight_reg=0.3,
                                          epochs=2000, batch_size=32, learning_rate=0.0005,
                                          patience=400)
 
-    # 模型预测（取修正预测值）
+    # Model predictions (corrected prediction values)
     corrected_output, physics_output, loc, scale = trained_model(X_seq, training=False)
     y_pred_corrected = corrected_output.numpy().flatten()
     y_pred_physics = physics_output.numpy().flatten()
@@ -391,24 +391,24 @@ def main():
     print("y_pred_physics:", y_pred_physics)
     mape_nn = compute_mape(y_true_full, y_pred_corrected)
     mape_physics = compute_mape(y_true_full, y_pred_physics)
-    print(f"神经网络修正预测与真实值之间的 MAPE: {mape_nn:.2f}%")
-    print(f"物理公式预测与真实值之间的 MAPE: {mape_physics:.2f}%")
+    print(f"MAPE between corrected NN prediction and ground truth: {mape_nn:.2f}%")
+    print(f"MAPE between physics-based prediction and ground truth: {mape_physics:.2f}%")
 
-    # 计算R²
+    # Compute R²
     r2_train = compute_r2(y_train.flatten(), trained_model(X_train, training=False)[0].numpy().flatten())
     r2_val = compute_r2(y_val.flatten(), trained_model(X_val, training=False)[0].numpy().flatten())
-    print(f"训练集 R²: {r2_train:.5f}, 验证集 R²: {r2_val:.5f}")
+    print(f"Training R²: {r2_train:.5f}, Validation R²: {r2_val:.5f}")
 
-    # 绘制训练过程图表
+    # Plot training process
     plot_history(history, FIG_PATH)
-    # 绘制预测对比图
+    # Plot prediction comparison
     plot_predictions(y_true_full, y_pred_corrected, y_pred_physics, FIG_PATH)
 
-    # 保存完整模型
+    # Save full model
     full_model_path = os.path.join(FIG_PATH, 'full_model')
     tfk.models.save_model(trained_model, full_model_path, overwrite=True,
                           include_optimizer=True, save_format='tf')
-    print(f"完整模型已保存至: {full_model_path}")
+    print(f"Full model saved at: {full_model_path}")
 
 
 if __name__ == "__main__":
